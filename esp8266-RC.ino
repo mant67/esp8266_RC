@@ -2,29 +2,118 @@
 #include <DNSServer.h>
 #include <Servo.h>
 #include "UdpReceiver.h"
+#include <EEPROM.h>
+
+extern "C" {
+  #include "user_interface.h"
+}
 
 // ===============================
 // ⚙️ CONFIGURAZIONE
 // ===============================
 
-#define SERVO_X_PIN 2     // GPIO2 -> servo sterzo
-#define SERVO_Y_PIN 15    // GPIO15 -> servo acceleratore/freno
+#define EEPROM_SIZE 64
+#define EEPROM_ADDR 0
 
-const byte DNS_PORT = 53;                    // Porta per DNS captive
-IPAddress apIP(192, 168, 4, 1);              // IP fisso dell’ESP in modalità AP
-UdpReceiver receiver(4210);                  // Porta UDP (deve combaciare con quella dell'app)
+#define CONNECTION_LED_PIN 0
+#define SERVO_X_PIN 2
+#define SERVO_Y_PIN 15
+
+unsigned long lastPingTime = 0;
+const unsigned long CONNECTION_TIMEOUT = 3000;
+bool isConnected = false;
+
+const byte DNS_PORT = 53;
+IPAddress apIP(192, 168, 4, 1);
+UdpReceiver receiver(4210);
 DNSServer dnsServer;
 
-Servo servoX, servoY;                        // Istanze dei servomotori
+Servo servoX, servoY;
 
 // ===============================
-// 🔁 Funzione di mappatura valori joystick [-100, 100] → angolo servo [0, 180]
+// 🔁 Mapping joystick → servo
 // ===============================
 int mapJoystickToServo(int value) {
-  value = constrain(value, -100, 100);         // Limita il range per sicurezza
-  float normalized = (float)(value + 100) / 200.0f;  // Normalizza tra 0.0 e 1.0
-  return (int)(normalized * 180.0f);           // Converte in angolo servo
+  value = constrain(value, -100, 100);
+  float normalized = (float)(value + 100) / 200.0f;
+  return (int)(normalized * 180.0f);
 }
+
+// ===============================
+// 🔁 salva MAC nella EEPROM
+// ===============================
+void saveMacToEEPROM(const String& mac) {
+  for (int i = 0; i < mac.length(); i++) {
+    EEPROM.write(EEPROM_ADDR + i, mac[i]);
+  }
+  EEPROM.write(EEPROM_ADDR + mac.length(), '\0');
+  EEPROM.commit();
+  Serial.print("💾 MAC salvato in EEPROM: ");
+  Serial.println(mac);
+}
+
+// ===============================
+// 🔁 legge MAC dalla EEPROM
+// ===============================
+String readMacFromEEPROM() {
+  char mac[32];
+  int i = 0;
+  while (i < sizeof(mac) - 1) {
+    char c = EEPROM.read(EEPROM_ADDR + i);
+    if (c == '\0') break;
+    // Se il carattere non è stampabile (ASCII tra 32 e 126), consideriamo la EEPROM "sporca"
+    if (c < 32 || c > 126) {
+      Serial.println("⚠️ EEPROM contiene caratteri non validi. Considerata vuota.");
+      return "";
+    }
+    mac[i++] = c;
+  }
+  mac[i] = '\0';
+
+  if (i == 0) {
+    return "";
+  }
+
+  return String(mac);
+}
+
+
+// ===============================
+// 🔍 Verifica se il MAC salvato è valido (evita dati sporchi)
+// ===============================
+bool isValidMac(const String& mac) {
+  return mac.length() == 17 && mac.indexOf(':') == 2; // formato tipico "XX:XX:XX:XX:XX:XX"
+}
+
+void checkConnectedClients() {
+  struct station_info* station_list = wifi_softap_get_station_info();
+  while (station_list != NULL) {
+    char macStr[18];
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+             station_list->bssid[0], station_list->bssid[1], station_list->bssid[2],
+             station_list->bssid[3], station_list->bssid[4], station_list->bssid[5]);
+    String incomingMac = String(macStr);
+
+    Serial.println("📶 Dispositivo connesso: " + incomingMac);
+
+    static String storedMac = readMacFromEEPROM();
+    if (storedMac.length() == 0) {
+      saveMacToEEPROM(incomingMac);
+      storedMac = incomingMac;
+      Serial.println("✅ Primo dispositivo associato.");
+    } else if (incomingMac != storedMac) {
+      Serial.println("⛔ MAC non autorizzato! Connessione non accettata.");
+      // Non si può disconnettere direttamente un client, ma puoi ignorarlo
+    } else {
+      Serial.println("🔐 Connessione autorizzata.");
+    }
+
+    station_list = STAILQ_NEXT(station_list, next);
+  }
+
+  wifi_softap_free_station_info();  // libera memoria
+}
+
 
 // ===============================
 // 🛠️ SETUP iniziale
@@ -33,48 +122,84 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  // 🔧 Genera SSID univoco: esempio "ESP_1A2B3C"
+  pinMode(CONNECTION_LED_PIN, OUTPUT);
+  digitalWrite(CONNECTION_LED_PIN, LOW);
+
   uint32_t chipId = ESP.getChipId();
   char ssid[32];
   snprintf(ssid, sizeof(ssid), "ESP_%06X", chipId);
 
-  // 📡 Configura modalità Access Point (senza password)
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-  WiFi.softAP(ssid, nullptr, 1, false, 1);  // 1 client massimo, canale 1, visibile
+  WiFi.softAP(ssid, nullptr, 1, false, 1);
 
-  // 🖨️ Info di debug sulla rete
   Serial.println();
   Serial.print("Access Point attivo. SSID: ");
   Serial.println(ssid);
   Serial.print("IP: ");
   Serial.println(WiFi.softAPIP());
 
-  // 🌐 Avvia server DNS per rispondere sempre con l’IP dell’ESP (captive DNS)
   dnsServer.start(DNS_PORT, "*", apIP);
 
-  // ⚙️ Inizializza i servo motori
   servoX.attach(SERVO_X_PIN);
   servoY.attach(SERVO_Y_PIN);
 
-  // 📥 Inizializza ricezione UDP
-  receiver.begin();
+  EEPROM.begin(EEPROM_SIZE);
 
-  // 📦 Callback per ricevere e gestire i comandi
+  // 🔁 Carica il MAC salvato
+  String storedMac = readMacFromEEPROM();
+  if (isValidMac(storedMac)) {
+    Serial.print("📂 MAC caricato da EEPROM: ");
+    Serial.println(storedMac);
+  } else {
+    Serial.println("ℹ️ Nessun MAC salvato o memoria sporca.");
+    storedMac = ""; // azzera se non valido
+  }
+
+  // 📡 Gestisce connessioni client
+  WiFi.onSoftAPModeStationConnected([storedMac](const WiFiEventSoftAPModeStationConnected& event) mutable {
+    char macStr[18];
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+             event.mac[0], event.mac[1], event.mac[2],
+             event.mac[3], event.mac[4], event.mac[5]);
+    String incomingMac = String(macStr);
+  
+    Serial.println("📶 Dispositivo connesso: " + incomingMac);
+  
+    if (storedMac == "") {
+      saveMacToEEPROM(incomingMac);
+      storedMac = incomingMac;
+      Serial.println("✅ Primo dispositivo associato.");
+    } else if (incomingMac != storedMac) {
+      Serial.println("⛔ MAC non autorizzato! Connessione non accettata.");
+    } else {
+      Serial.println("🔐 Connessione autorizzata.");
+    }
+  });
+
+  receiver.begin();
   receiver.onCommand([](const char* msg) {
     Serial.print("Comando ricevuto: ");
     Serial.println(msg);
+
+    if (strcmp(msg, "PING") == 0) {
+      lastPingTime = millis();
+      if (!isConnected) {
+        isConnected = true;
+        Serial.println("📶 Connessione attiva via PING");
+        digitalWrite(CONNECTION_LED_PIN, HIGH);
+      }
+      return;
+    }
 
     int x = 0, y = 0;
     if (sscanf(msg, "X:%d,Y:%d", &x, &y) == 2) {
       int angleX = mapJoystickToServo(x);
       int angleY = mapJoystickToServo(y);
 
-      // Usa x, y per controllare servomotori, ecc.
       Serial.print("X = "); Serial.print(x);
       Serial.print(" | Y = "); Serial.println(y);
 
-      // Evita di inviare valori identici al servo (risparmio energia/disturbi)
       static int lastAngleX = -1, lastAngleY = -1;
       if (angleX != lastAngleX) {
         servoX.write(angleX);
@@ -89,9 +214,24 @@ void setup() {
 }
 
 // ===============================
-// 🔄 LOOP principale
+// 🔁 LOOP principale
 // ===============================
+
+unsigned long lastClientCheck = 0;
+const unsigned long CLIENT_CHECK_INTERVAL = 2000;
+
 void loop() {
-  dnsServer.processNextRequest(); // 🔄 Gestisce le richieste DNS (non blocca)
-  receiver.update();              // 🔄 Controlla eventuali pacchetti UDP ricevuti
+  dnsServer.processNextRequest();
+  receiver.update();
+
+  if (isConnected && millis() - lastPingTime > CONNECTION_TIMEOUT) {
+    isConnected = false;
+    Serial.println("❌ Timeout connessione. LED spento.");
+    digitalWrite(CONNECTION_LED_PIN, LOW);
+  }
+
+  if (millis() - lastClientCheck > CLIENT_CHECK_INTERVAL) {
+    checkConnectedClients();
+    lastClientCheck = millis();
+  }
 }
