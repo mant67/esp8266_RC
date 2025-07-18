@@ -31,6 +31,57 @@ DNSServer dnsServer;
 Servo servoX, servoY;
 
 // ===============================
+// 🛠️ FUNZIONI DI GESTIONE LOW-LEVEL
+// ===============================
+extern "C" {
+#include "user_interface.h"
+}
+
+
+String macToString(const uint8_t* mac) {
+    char buf[18];
+    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", 
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return String(buf);
+}
+
+void wifiEventHandler(System_Event_t* evt) {
+    switch (evt->event) {
+        case EVENT_SOFTAPMODE_STACONNECTED: {
+            // Aggiungi parentesi per creare un nuovo scope
+            String incomingMac = macToString(evt->event_info.sta_connected.mac);
+            Serial.print("Connesso: ");
+            Serial.println(incomingMac);
+            digitalWrite(CONNECTION_LED_PIN, HIGH);
+
+            static String storedMac = readMacFromEEPROM();
+            if (storedMac.length() == 0) {
+                saveMacToEEPROM(incomingMac);
+                storedMac = incomingMac;
+                Serial.println("✅ Dispositivo associato.");
+            } else if (incomingMac != storedMac) {
+                Serial.println("⛔ MAC non autorizzato! Connessione non accettata.");
+            } else {
+                Serial.println("🔐 Connessione accettata.");
+            }
+            break;
+        }
+            
+        case EVENT_SOFTAPMODE_STADISCONNECTED: {
+            // Correggi qui: usa sta_disconnected invece di sta_connected
+            uint8_t* mac = evt->event_info.sta_disconnected.mac;
+            Serial.print("Disconnesso: ");
+            Serial.println(macToString(mac));
+            digitalWrite(CONNECTION_LED_PIN, LOW);
+            break;
+        }
+    }
+}
+
+
+
+
+// ===============================
 // 🔁 Mapping joystick → servo
 // ===============================
 int mapJoystickToServo(int value) {
@@ -125,13 +176,18 @@ void setup() {
   pinMode(CONNECTION_LED_PIN, OUTPUT);
   digitalWrite(CONNECTION_LED_PIN, LOW);
 
+  // Registra l'handler di sistema LOW-LEVEL
+  wifi_set_event_handler_cb(wifiEventHandler);
+
   uint32_t chipId = ESP.getChipId();
   char ssid[32];
   snprintf(ssid, sizeof(ssid), "ESP_%06X", chipId);
 
   WiFi.mode(WIFI_AP);
+
+  const char* password = "ESP12345";  // password
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-  WiFi.softAP(ssid, nullptr, 1, false, 1);
+  WiFi.softAP(ssid, password, 1, false, 1);
 
   Serial.println();
   Serial.print("Access Point attivo. SSID: ");
@@ -156,6 +212,7 @@ void setup() {
     storedMac = ""; // azzera se non valido
   }
 
+  /*
   // 📡 Gestisce connessioni client
   WiFi.onSoftAPModeStationConnected([storedMac](const WiFiEventSoftAPModeStationConnected& event) mutable {
     char macStr[18];
@@ -176,12 +233,14 @@ void setup() {
       Serial.println("🔐 Connessione autorizzata.");
     }
   });
+  */
 
   receiver.begin();
   receiver.onCommand([](const char* msg) {
     Serial.print("Comando ricevuto: ");
     Serial.println(msg);
 
+/*
     if (strcmp(msg, "PING") == 0) {
       lastPingTime = millis();
       if (!isConnected) {
@@ -191,6 +250,7 @@ void setup() {
       }
       return;
     }
+*/
 
     int x = 0, y = 0;
     if (sscanf(msg, "X:%d,Y:%d", &x, &y) == 2) {
@@ -224,6 +284,7 @@ void loop() {
   dnsServer.processNextRequest();
   receiver.update();
 
+  /*
   if (isConnected && millis() - lastPingTime > CONNECTION_TIMEOUT) {
     isConnected = false;
     Serial.println("❌ Timeout connessione. LED spento.");
@@ -234,4 +295,5 @@ void loop() {
     checkConnectedClients();
     lastClientCheck = millis();
   }
+  */
 }
