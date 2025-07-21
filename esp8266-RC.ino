@@ -20,7 +20,7 @@ extern "C" {
 #define SERVO_Y_PIN 15
 
 unsigned long lastPingTime = 0;
-const unsigned long CONNECTION_TIMEOUT = 3000;
+const unsigned long CONNECTION_TIMEOUT = 6000;
 bool isConnected = false;
 
 const byte DNS_PORT = 53;
@@ -35,6 +35,7 @@ Servo servoX, servoY;
 // ===============================
 extern "C" {
 #include "user_interface.h"
+void wifi_softap_deauth(uint8 *mac);
 }
 
 
@@ -59,10 +60,15 @@ void wifiEventHandler(System_Event_t* evt) {
                 saveMacToEEPROM(incomingMac);
                 storedMac = incomingMac;
                 Serial.println("✅ Dispositivo associato.");
+                lastPingTime = millis();
+                isConnected = true;
             } else if (incomingMac != storedMac) {
                 Serial.println("⛔ MAC non autorizzato! Connessione non accettata.");
+                 wifi_softap_deauth((uint8*)evt->event_info.sta_connected.mac);  // ✅ CORRETTO
             } else {
                 Serial.println("🔐 Connessione accettata.");
+                lastPingTime = millis();
+                isConnected = true;
             }
             break;
         }
@@ -136,35 +142,6 @@ bool isValidMac(const String& mac) {
   return mac.length() == 17 && mac.indexOf(':') == 2; // formato tipico "XX:XX:XX:XX:XX:XX"
 }
 
-void checkConnectedClients() {
-  struct station_info* station_list = wifi_softap_get_station_info();
-  while (station_list != NULL) {
-    char macStr[18];
-    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-             station_list->bssid[0], station_list->bssid[1], station_list->bssid[2],
-             station_list->bssid[3], station_list->bssid[4], station_list->bssid[5]);
-    String incomingMac = String(macStr);
-
-    Serial.println("📶 Dispositivo connesso: " + incomingMac);
-
-    static String storedMac = readMacFromEEPROM();
-    if (storedMac.length() == 0) {
-      saveMacToEEPROM(incomingMac);
-      storedMac = incomingMac;
-      Serial.println("✅ Primo dispositivo associato.");
-    } else if (incomingMac != storedMac) {
-      Serial.println("⛔ MAC non autorizzato! Connessione non accettata.");
-      // Non si può disconnettere direttamente un client, ma puoi ignorarlo
-    } else {
-      Serial.println("🔐 Connessione autorizzata.");
-    }
-
-    station_list = STAILQ_NEXT(station_list, next);
-  }
-
-  wifi_softap_free_station_info();  // libera memoria
-}
-
 
 // ===============================
 // 🛠️ SETUP iniziale
@@ -188,6 +165,7 @@ void setup() {
   const char* password = "ESP12345";  // password
   WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
   WiFi.softAP(ssid, password, 1, false, 1);
+ 
 
   Serial.println();
   Serial.print("Access Point attivo. SSID: ");
@@ -212,45 +190,16 @@ void setup() {
     storedMac = ""; // azzera se non valido
   }
 
-  /*
-  // 📡 Gestisce connessioni client
-  WiFi.onSoftAPModeStationConnected([storedMac](const WiFiEventSoftAPModeStationConnected& event) mutable {
-    char macStr[18];
-    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-             event.mac[0], event.mac[1], event.mac[2],
-             event.mac[3], event.mac[4], event.mac[5]);
-    String incomingMac = String(macStr);
-  
-    Serial.println("📶 Dispositivo connesso: " + incomingMac);
-  
-    if (storedMac == "") {
-      saveMacToEEPROM(incomingMac);
-      storedMac = incomingMac;
-      Serial.println("✅ Primo dispositivo associato.");
-    } else if (incomingMac != storedMac) {
-      Serial.println("⛔ MAC non autorizzato! Connessione non accettata.");
-    } else {
-      Serial.println("🔐 Connessione autorizzata.");
-    }
-  });
-  */
 
   receiver.begin();
   receiver.onCommand([](const char* msg) {
     Serial.print("Comando ricevuto: ");
     Serial.println(msg);
 
-/*
     if (strcmp(msg, "PING") == 0) {
       lastPingTime = millis();
-      if (!isConnected) {
-        isConnected = true;
-        Serial.println("📶 Connessione attiva via PING");
-        digitalWrite(CONNECTION_LED_PIN, HIGH);
-      }
       return;
     }
-*/
 
     int x = 0, y = 0;
     if (sscanf(msg, "X:%d,Y:%d", &x, &y) == 2) {
@@ -284,16 +233,10 @@ void loop() {
   dnsServer.processNextRequest();
   receiver.update();
 
-  /*
   if (isConnected && millis() - lastPingTime > CONNECTION_TIMEOUT) {
     isConnected = false;
     Serial.println("❌ Timeout connessione. LED spento.");
     digitalWrite(CONNECTION_LED_PIN, LOW);
   }
 
-  if (millis() - lastClientCheck > CLIENT_CHECK_INTERVAL) {
-    checkConnectedClients();
-    lastClientCheck = millis();
-  }
-  */
 }
