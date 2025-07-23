@@ -3,6 +3,7 @@
 #define EEPROM_SIZE 64
 #define EEPROM_ADDR 0
 
+#define RESET_PIN 14 
 #define CONNECTION_LED_PIN 0
 #define SERVO_X_PIN 2
 #define SERVO_Y_PIN 15

@@ -28,6 +28,13 @@ String readMacFromEEPROM() {
   return String(mac);
 }
 
+void clearMacFromEEPROM() {
+  for (int i = EEPROM_ADDR; i < EEPROM_ADDR + 18; i++) {
+    EEPROM.write(i, 0xFF);
+  }
+  EEPROM.commit();
+}
+
 bool isValidMac(const String& mac) {
   return mac.length() == 17 && mac.indexOf(':') == 2;
 }

@@ -15,6 +15,9 @@ Servo servoX, servoY;
 unsigned long lastPingTime = 0;
 const unsigned long CONNECTION_TIMEOUT = 6000;
 
+volatile unsigned long resetStartTime = 0;
+const unsigned long RESET_HOLD_TIME = 3000; // 3 secondi
+
 // ===============================
 // 🔁 Mapping joystick → servo
 // ===============================
@@ -24,6 +27,34 @@ int mapJoystickToServo(int value) {
   return (int)(normalized * 180.0f);
 }
 
+
+
+// ===============================
+// 🔁 Reset- FALLING
+// ===============================
+void ICACHE_RAM_ATTR onResetPressed() {
+  if (digitalRead(RESET_PIN) == LOW) {
+    resetStartTime = millis();
+  }
+}
+
+
+// ===============================
+// 🔁 Reset- RISING
+// ===============================
+void ICACHE_RAM_ATTR onResetReleased() {
+  unsigned long duration = millis() - resetStartTime;
+  if (duration >= RESET_HOLD_TIME) {
+    clearMacFromEEPROM();  // EEPROM reset
+    DEBUG_PRINTLN("✅ MAC cancellato dalla EEPROM (reset via pulsante).");
+  } else {
+    DEBUG_PRINTLN("❌ Pulsante rilasciato troppo presto. Reset annullato.");
+  }
+}
+
+
+
+
 void setup() {
   #if USE_SERIAL
     Serial.begin(115200);
@@ -32,6 +63,11 @@ void setup() {
   EEPROM.begin(EEPROM_SIZE);
   setupWiFi();
 
+
+  pinMode(RESET_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(RESET_PIN), onResetPressed, FALLING);
+  attachInterrupt(digitalPinToInterrupt(RESET_PIN), onResetReleased, RISING);
+  
   servoX.attach(SERVO_X_PIN);
   servoY.attach(SERVO_Y_PIN);
 
