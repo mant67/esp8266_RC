@@ -1,4 +1,3 @@
-
 #ifndef UDP_RECEIVER_H
 #define UDP_RECEIVER_H
 
@@ -12,6 +11,7 @@ private:
     unsigned int port;
     char packetBuffer[256];
     UdpCommandCallback callback;
+    bool packetReceived = false;
 
 public:
     UdpReceiver(unsigned int listenPort = 4210) : port(listenPort) {}
@@ -35,8 +35,17 @@ public:
                 if (callback) {
                     callback(packetBuffer);
                 }
+                packetReceived = true;
             }
         }
+    }
+
+    bool wasPacketReceived() {
+        if (packetReceived) {
+            packetReceived = false;
+            return true;
+        }
+        return false;
     }
 };
 

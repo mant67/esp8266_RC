@@ -1,6 +1,7 @@
 #include "WiFiManager.h"
 #include "MacManager.h"
 #include "config.h"
+#include "AppState.h"
 #include <DNSServer.h>
 
 extern "C" {
@@ -33,9 +34,11 @@ void wifiEventHandler(System_Event_t* evt) {
         //saveMacToEEPROM(incomingMac);
         storedMac = incomingMac;
         DEBUG_PRINTLN("✅ Dispositivo associato.");
+        setHasBinding(true);
       } else if (incomingMac != storedMac) {
         DEBUG_PRINTLN("⛔ MAC non autorizzato!");
         wifi_softap_deauth((uint8*)evt->event_info.sta_connected.mac);
+        setHasBinding(false);
         return;
       }
 

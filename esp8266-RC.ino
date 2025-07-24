@@ -9,52 +9,47 @@
 #include "WiFiManager.h"
 #include "LedStatusManager.h"
 
-UdpReceiver receiver(4210);
+// === Istanze globali ===
+UdpReceiver receiver(UDP_PORT);
 Servo servoX, servoY;
 LedStatusManager ledManager;
 
-volatile bool resetPending = false; 
-
-unsigned long lastPingTime = 0;
-const unsigned long CONNECTION_TIMEOUT = 6000;
-
+// === Stato globale ===
+static bool hasBinding = false;
+volatile bool resetPending = false;
 volatile unsigned long resetStartTime = 0;
-const unsigned long RESET_HOLD_TIME = 3000;
+unsigned long lastPingTime = 0;
+unsigned long lastActivityBlinkTime = 0;
+bool activityLedOn = false;
 
-// ===============================
-// 🎮 Mappatura joystick → servo
-// ===============================
+// === Binding accessibile globalmente ===
+bool getHasBinding() { return hasBinding; }
+void setHasBinding(bool value) { hasBinding = value; }
+
+// === Mappatura joystick → servo (da -100..100 a 0..180) ===
 int mapJoystickToServo(int value) {
   value = constrain(value, -100, 100);
-  float normalized = (float)(value + 100) / 200.0f;
-  return (int)(normalized * 180.0f);
+  return (int)(((value + 100) / 200.0f) * 180.0f);
 }
 
-// ===============================
-// 🔁 Interrupt: pressione pulsante (falling)
-// ===============================
+// === Gestione pulsante RESET ===
 void ICACHE_RAM_ATTR onResetPressed() {
   if (digitalRead(RESET_PIN) == LOW) {
     resetStartTime = millis();
   }
 }
 
-// ===============================
-// 🔁 Interrupt: rilascio pulsante (rising)
-// ===============================
 void ICACHE_RAM_ATTR onResetReleased() {
   unsigned long duration = millis() - resetStartTime;
   if (duration >= RESET_HOLD_TIME) {
-    resetPending = true;   // ⚠️ da gestire nel loop
+    resetPending = true;
     DEBUG_PRINTLN("✅ MAC cancellato. Reset logico in arrivo...");
   } else {
     DEBUG_PRINTLN("❌ Pulsante rilasciato troppo presto. Reset annullato.");
   }
-  resetStartTime = millis();
 }
 
-
-
+// === Setup iniziale ===
 void setup() {
   #if USE_SERIAL
     Serial.begin(115200);
@@ -63,62 +58,77 @@ void setup() {
   EEPROM.begin(EEPROM_SIZE);
   setupWiFi();
 
+  // Pulsante di reset
   pinMode(RESET_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(RESET_PIN), onResetPressed, FALLING);
   attachInterrupt(digitalPinToInterrupt(RESET_PIN), onResetReleased, RISING);
 
+  // LED di stato
   ledManager.begin();
 
+  // Servo
   servoX.attach(SERVO_X_PIN);
   servoY.attach(SERVO_Y_PIN);
 
+  // Carica MAC da EEPROM
   String mac = readMacFromEEPROM();
   if (isValidMac(mac)) {
-    DEBUG_PRINT("📂 MAC caricato da EEPROM: ");
+    DEBUG_PRINT("\xF0\x9F\x93\x82 MAC caricato da EEPROM: ");
     DEBUG_PRINTLN(mac);
+    hasBinding = true;
     ledManager.setStatus(LedStatusManager::BINDING_NO_CONNECTION);
   } else {
-    DEBUG_PRINTLN("ℹ️ Nessun MAC salvato o memoria sporca.");
+    DEBUG_PRINTLN("\xE2\x84\xB9 Nessun MAC salvato o memoria corrotta.");
+    hasBinding = false;
     ledManager.setStatus(LedStatusManager::NO_BINDING);
   }
 
   setupReceiver(receiver, servoX, servoY, lastPingTime);
+  lastPingTime = millis() - CONNECTION_TIMEOUT - 1; // forza primo controllo
 }
 
+// === Loop principale ===
 void loop() {
   updateWiFi();
   receiver.update();
 
-
-  if (resetPending) {
-    resetPending = false;
-
-    // 1. Disconnette tutti i client e ferma AP
-    WiFi.softAPdisconnect(true);
-    delay(100);
-
-    // 2. Pulisci variabili/mac (già fatto nella ISR col clearMacFromEEPROM)
-    clearMacFromEEPROM();  // EEPROM reset
-    
-    // 3. Riavvia Access Point
-    setupWiFi();
-
-    // 4. Reinizializza il receiver e led
-    // setupReceiver(receiver, servoX, servoY, lastPingTime);
-    //ledManager.setStatus(LedStatusManager::NO_BINDING);
-
-    DEBUG_PRINTLN("🔄 Reinizializzazione completa senza reset hardware.");
-    ESP.restart(); // ✅ riavvio completo (senza pulsante)
+  // 🔁 Breve blink LED quando si riceve un pacchetto
+  if (receiver.wasPacketReceived()) {
+    digitalWrite(CONNECTION_LED_PIN, LOW);  // LED spento per attività
+    lastActivityBlinkTime = millis();
+    activityLedOn = true;
   }
 
-  // Stato connessione via ping
-  if (millis() - lastPingTime <= CONNECTION_TIMEOUT) {
-    if (ledManager.getStatus() != LedStatusManager::CONNECTED) {
-      ledManager.setStatus(LedStatusManager::CONNECTED);
-    }
-  } else {
-    if (ledManager.getStatus() == LedStatusManager::CONNECTED) {
-      ledManager.setStatus(LedStatusManager::BINDING_NO_CONNECTION);
+  // 🔁 Dopo il blink, ripristina stato LED
+  if (activityLedOn && millis() - lastActivityBlinkTime > ACTIVITY_BLINK_DURATION) {
+    activityLedOn = false;
+    ledManager.refresh(); // ripristina ON o lampeggio
+  }
+
+  // 🔁 Reset logico se richiesto da pulsante
+  if (resetPending) {
+    resetPending = false;
+    WiFi.softAPdisconnect(true);
+    delay(100);
+    clearMacFromEEPROM();
+    hasBinding = false;
+    setupWiFi();
+    DEBUG_PRINTLN("♻️ Reinizializzazione senza reset hardware.");
+    ESP.restart();
+  }
+
+  // 🔁 Aggiorna stato LED in base alla connessione (binding attivo)
+  if (hasBinding) {
+    LedStatusManager::LedStatus desiredStatus = 
+      (millis() - lastPingTime <= CONNECTION_TIMEOUT)
+        ? LedStatusManager::CONNECTED
+        : LedStatusManager::BINDING_NO_CONNECTION;
+
+    if (ledManager.getStatus() != desiredStatus) {
+      DEBUG_PRINTLN(desiredStatus == LedStatusManager::CONNECTED
+        ? "\xF0\x9F\x94\xB5 LED: CONNECTED"
+        : "\xF0\x9F\x94\xB5 LED: BINDING_NO_CONNECTION");
+      ledManager.setStatus(desiredStatus);
     }
   }
 }

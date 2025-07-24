@@ -1,4 +1,3 @@
-// LedStatusManager.h
 #pragma once
 #include <Arduino.h>
 #include <Ticker.h>
@@ -15,42 +14,61 @@ public:
   void begin() {
     pinMode(CONNECTION_LED_PIN, OUTPUT);
     digitalWrite(CONNECTION_LED_PIN, LOW);
+    currentStatus = NO_BINDING;
+    instance = this;
+    ledTicker.attach_ms(100, toggleLedStatic);
+    DEBUG_PRINTLN("🔴 Stato iniziale LED: NO_BINDING (lampeggio veloce)");
   }
 
   void setStatus(LedStatus newStatus) {
     if (newStatus == currentStatus) return;
 
     currentStatus = newStatus;
-    ledTicker.detach(); // Ferma eventuale lampeggio in corso
-
-    switch (currentStatus) {
-      case NO_BINDING:
-        ledTicker.attach_ms(100, []() { toggleLed(); }); // Lampeggio veloce
-        break;
-      case BINDING_NO_CONNECTION:
-        ledTicker.attach_ms(500, []() { toggleLed(); }); // Lampeggio lento
-        break;
-      case CONNECTED:
-        ledTicker.detach();
-        digitalWrite(CONNECTION_LED_PIN, HIGH); // LED acceso fisso
-        break;
-    }
+    applyStatus(currentStatus);
   }
 
   LedStatus getStatus() {
     return currentStatus;
   }
 
+  // 🔄 Ripristina lo stato LED attuale (utile dopo lampeggio temporaneo)
+  void refresh() {
+    applyStatus(currentStatus);
+  }
+
 private:
   Ticker ledTicker;
   LedStatus currentStatus = NO_BINDING;
-  static bool ledState;
+  bool ledState = false;
 
-  static void toggleLed() {
+  void toggleLed() {
     ledState = !ledState;
     digitalWrite(CONNECTION_LED_PIN, ledState);
   }
+
+  static void toggleLedStatic() {
+    if (instance) instance->toggleLed();
+  }
+
+  void applyStatus(LedStatus status) {
+    ledTicker.detach(); // Ferma qualsiasi lampeggio precedente
+
+    switch (status) {
+      case NO_BINDING:
+        ledTicker.attach_ms(100, toggleLedStatic); // Lampeggio veloce
+        break;
+      case BINDING_NO_CONNECTION:
+        ledTicker.attach_ms(500, toggleLedStatic); // Lampeggio lento
+        break;
+      case CONNECTED:
+        digitalWrite(CONNECTION_LED_PIN, HIGH); // LED acceso fisso
+        ledState = true;
+        break;
+    }
+  }
+
+  static LedStatusManager* instance;
 };
 
-// Definizione statica
-bool LedStatusManager::ledState = false;
+// ⚠️ Definizione della variabile statica
+LedStatusManager* LedStatusManager::instance = nullptr;
